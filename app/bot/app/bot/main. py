@@ -1,0 +1,99 @@
+import asyncio
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from config.settings import config
+from app.database.models import users_collection, logs_collection
+from app.utils.logger import setup_logger
+from app.bot import handlers
+
+logger = setup_logger("bot")
+
+app = Client(
+    name=config.BOT_NAME,
+    api_id=config.API_ID,
+    api_hash=config.API_HASH,
+    bot_token=config.BOT_TOKEN,
+    workers=100,
+    sleep_threshold=60
+)
+
+# Savage bot personality responses
+SAVAGE_RESPONSES = [
+    "Bhai mujhe koi file ya link nahi mila 😑\nFile ya link bhej.\nBakchodi band kar laude 😡",
+    "Oye! File ya link bhejna hai toh bhej, warna idhar se hato!",
+    "Bhai bot ko timepass nahi karne ka, kaam hai toh file bhej!",
+    "Yeh bakchodi band kar aur file bhej, warna ghar se utha ke le jaunga!",
+    "File? Link? Kuch bhi nahi? Toh message kyu bhej raha hai! 😤"
+]
+
+# Random message handler
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "boss"]))
+async def handle_random_message(client: Client, message: Message):
+    user = message.from_user
+    
+    # Log the random message
+    logs_collection.insert_one({
+        "log_id": f"{user.id}_{message.id}",
+        "user_id": user.id,
+        "action": "random_message",
+        "details": {"text": message.text[:50]},
+        "timestamp": datetime.utcnow()
+    })
+    
+    # Send savage response
+    import random
+    response = random.choice(SAVAGE_RESPONSES)
+    
+    await message.reply_text(response)
+
+# File handler
+@app.on_message(filters.private & (filters.document | filters.video | filters.audio))
+async def handle_file_upload(client: Client, message: Message):
+    # FSub check
+    if not await check_fsub(client, message.from_user.id):
+        await message.reply_text(
+            "**Bhai pehle channel join kar!** 😡\n\n"
+            f"Join: {config.FSUB_CHANNELS[0]['url']}\n"
+            "Join kar ke phir se file bhej!"
+        )
+        return
+    
+    # User limit check
+    user_data = users_collection.find_one({"user_id": message.from_user.id})
+    
+    if not user_data.get("is_premium", False):
+        if user_data["daily_files_used"] >= config.FREE_DAILY_FILES:
+            await message.reply_text(
+                "**Limit pura ho gaya bhai!** 🚫\n"
+                "Aaj ke liye 4 files ho gayi.\n"
+                "Kal aa ya **PREMIUM le le!** 🔥"
+            )
+            # Log limit breach
+            logs_collection.insert_one({
+                "action": "limit_breach",
+                "user_id": message.from_user.id,
+                "details": {"type": "files", "limit": config.FREE_DAILY_FILES}
+            })
+            return
+    
+    # Process file...
+    await message.reply_text("**File mil gayi!** 🔥\nProcessing...")
+
+async def check_fsub(client: Client, user_id: int) -> bool:
+    """Check if user joined all required channels"""
+    for channel in config.FSUB_CHANNELS:
+        try:
+            member = await client.get_chat_member(channel["id"], user_id)
+            if member.status in ["left", "kicked", "restricted"]:
+                return False
+        except:
+            return False
+    return True
+
+async def main():
+    await app.start()
+    logger.info(f"{config.BOT_NAME} bot started!")
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    asyncio.run(main())
